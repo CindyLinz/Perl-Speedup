@@ -1,0 +1,10 @@
+Changes
+Makefile.PL
+MANIFEST
+ppport.h
+README
+Speedup.xs
+t/Speedup.t
+fallback/const-c.inc
+fallback/const-xs.inc
+lib/Speedup.pm

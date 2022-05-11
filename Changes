@@ -1,0 +1,6 @@
+Revision history for Perl extension Speedup.
+
+0.01  Thu May 12 03:02:48 2022
+	- original version; created by h2xs 1.23 with options
+		-n Speedup
+
