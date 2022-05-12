@@ -59,6 +59,17 @@ XSLoader::load('Speedup', $VERSION);
 
 # Autoload methods go after =cut, and are processed by the autosplit program.
 
+sub destroy_op_chain {
+    my @stack = @_;
+    while(my $op = pop @stack) {
+        for my $key (keys %$op) {
+            if( substr($key, 0, 1) eq '~' ) {
+                push @stack, delete $op->{$key};
+            }
+        }
+    }
+}
+
 1;
 __END__
 # Below is stub documentation for your module. You'd better edit it!
