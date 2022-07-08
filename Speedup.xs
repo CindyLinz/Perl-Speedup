@@ -8,6 +8,9 @@
 #include "const-c.inc"
 
 SV * create_op_chain(pTHX_ OP * start_op, CV * cv){
+    if( !start_op )
+        return &PL_sv_undef;
+
     HV * op_collection_HV = newHV();
     sv_2mortal((SV*) op_collection_HV);
 
@@ -21,10 +24,27 @@ SV * create_op_chain(pTHX_ OP * start_op, CV * cv){
     SV ** pending_parent_cntrs;
     Newx(pending_parent_cntrs, pending_op_capacity, SV*);
 
-    inline void enlarge_pending_ops(){
-        pending_op_capacity *= 2;
-        Renew(pending_ops, pending_op_capacity, OP*);
-        Renew(pending_parent_cntrs, pending_op_capacity, SV*);
+    inline void enlarge_pending_ops(int n){
+        if( pending_op_p+n > pending_op_capacity ){
+            pending_op_capacity *= 2;
+            Renew(pending_ops, pending_op_capacity, OP*);
+            Renew(pending_parent_cntrs, pending_op_capacity, SV*);
+        }
+    }
+
+    inline SV * get_varname_sv(PADOFFSET offset){
+        PADLIST * const padlist = CvPADLIST(cv);
+        PADNAMELIST * comppad = PadlistNAMES(padlist);
+        PADNAME * name_SV = padnamelist_fetch(comppad, offset);
+        return name_SV ?
+            newSVpvf("%" PNf, PNfARG(name_SV)) :
+            newSVpvf("[%" UVuf "]", (UV)offset);
+    }
+
+    inline SV * get_gvname_sv(GV * gv){
+        SV * name_SV = newSVpvs_flags("", 0);
+        gv_fullname3(name_SV, gv, NULL);
+        return name_SV;
     }
 
     SV * start_entry_SV = newSV(0);
@@ -49,14 +69,48 @@ SV * create_op_chain(pTHX_ OP * start_op, CV * cv){
         hv_store(op_bag_HV, "name", 4, newSVpv(OP_NAME(o), 0), 0);
         hv_store(op_bag_HV, "desc", 4, newSVpv(OP_DESC(o), 0), 0);
 
-        if( OP_TYPE_IS_NN(o, OP_NEXTSTATE) ||
-            OP_TYPE_IS_NN(o, OP_PUSHMARK) ||
-            OP_TYPE_IS_NN(o, OP_ENTERLOOP) ||
+        if( OP_TYPE_IS_NN(o, OP_NEXTSTATE) ){
+            HV * chain_HV = Perl_refcounted_he_chain_2hv(aTHX_ ((COP*)o)->cop_hints_hash, 0);
+
+            hv_store(op_bag_HV, "chain", 5, newRV_noinc((SV*)chain_HV), 0);
+            hv_store(op_bag_HV, "~next", 5, pending_parent_cntrs[pending_op_p] =newSV(0), 0);
+            pending_ops[pending_op_p++] = o->op_next;//LINKLIST(o);
+        }
+
+        else if( OP_TYPE_IS_NN(o, OP_PUSHMARK) ||
             OP_TYPE_IS_NN(o, OP_LEAVELOOP) ||
             OP_TYPE_IS_NN(o, OP_ENTER) ||
             OP_TYPE_IS_NN(o, OP_LEAVE) ||
             0
         ){
+            hv_store(op_bag_HV, "~next", 5, pending_parent_cntrs[pending_op_p] =newSV(0), 0);
+            pending_ops[pending_op_p++] = o->op_next;//LINKLIST(o);
+        }
+
+        else if( OP_TYPE_IS_NN(o, OP_ENTERLOOP)){
+            enlarge_pending_ops(6);
+
+            if( cLOOPo->op_first ){
+                hv_store(op_bag_HV, "~first", 6, pending_parent_cntrs[pending_op_p] =newSV(0), 0);
+                pending_ops[pending_op_p++] = cLOOPo->op_first;
+            }
+            if( cLOOPo->op_last ){
+                hv_store(op_bag_HV, "~last", 5, pending_parent_cntrs[pending_op_p] =newSV(0), 0);
+                pending_ops[pending_op_p++] = cLOOPo->op_last;
+            }
+            if( cLOOPo->op_redoop ){
+                hv_store(op_bag_HV, "~redoop", 7, pending_parent_cntrs[pending_op_p] =newSV(0), 0);
+                pending_ops[pending_op_p++] = cLOOPo->op_redoop;
+            }
+            if( cLOOPo->op_nextop ){
+                hv_store(op_bag_HV, "~nextop", 7, pending_parent_cntrs[pending_op_p] =newSV(0), 0);
+                pending_ops[pending_op_p++] = cLOOPo->op_nextop;
+            }
+            if( cLOOPo->op_lastop ){
+                hv_store(op_bag_HV, "~lastop", 7, pending_parent_cntrs[pending_op_p] =newSV(0), 0);
+                pending_ops[pending_op_p++] = cLOOPo->op_lastop;
+            }
+
             hv_store(op_bag_HV, "~next", 5, pending_parent_cntrs[pending_op_p] =newSV(0), 0);
             pending_ops[pending_op_p++] = o->op_next;//LINKLIST(o);
         }
@@ -67,10 +121,8 @@ SV * create_op_chain(pTHX_ OP * start_op, CV * cv){
         }
 
         else if( OP_TYPE_IS_NN(o, OP_SASSIGN) ){
-            if(o->op_private & OPpASSIGN_BACKWARDS) /* {or,and,dor}assign */
-                hv_store(op_bag_HV, "flip_args", 9, newSViv(1), 0);
-            if(UNLIKELY(o->op_private & OPpASSIGN_CV_TO_GV))
-                hv_store(op_bag_HV, "set_module_sub", 14, newSViv(1), 0);
+            hv_store(op_bag_HV, "flip_args", 9, newSViv(o->op_private & OPpASSIGN_BACKWARDS), 0); /* {or,and,dor}assign */
+            hv_store(op_bag_HV, "set_module_sub", 14, newSViv(o->op_private & OPpASSIGN_CV_TO_GV), 0);
 
             hv_store(op_bag_HV, "~next", 5, pending_parent_cntrs[pending_op_p] =newSV(0), 0);
             pending_ops[pending_op_p++] = o->op_next;//LINKLIST(o);
@@ -79,70 +131,54 @@ SV * create_op_chain(pTHX_ OP * start_op, CV * cv){
         else if( OP_TYPE_IS_NN(o, OP_PADRANGE) ){
             PADOFFSET base = o->op_targ;
             int count = (int)(o->op_private) & OPpPADRANGE_COUNTMASK;
-            hv_store(op_bag_HV, "base", 4, newSViv(base), 0);
+            hv_store(op_bag_HV, "offset", 6, newSViv(base), 0);
             hv_store(op_bag_HV, "count", 5, newSViv(count), 0);
-            if(o->op_flags & OPf_SPECIAL)
-                hv_store(op_bag_HV, "special", 7, newSVpvn("@_", 2), 0);
-            if(o->op_private & OPpLVAL_INTRO)
-                hv_store(op_bag_HV, "my", 2, newSViv(1), 0);
-            if((o->op_flags & OPf_WANT) == OPf_WANT_VOID)
-                hv_store(op_bag_HV, "void_context", 12, newSViv(1), 0);
+            hv_store(op_bag_HV, "special", 7, newSViv(o->op_flags & OPf_SPECIAL), 0);
+            hv_store(op_bag_HV, "my", 2, newSViv(o->op_private & OPpLVAL_INTRO), 0);
+            hv_store(op_bag_HV, "void_context", 12, newSViv((o->op_flags & OPf_WANT) == OPf_WANT_VOID), 0);
 
             PADLIST * const padlist = CvPADLIST(cv);
             PADNAMELIST * comppad = PadlistNAMES(padlist);
             SV * var_SVs[count];
-            for(int i=0; i<count; ++i){
-                PADNAME * name_SV = padnamelist_fetch(comppad, base+i);
-                var_SVs[i] = sv_2mortal(name_SV ?
-                    newSVpvf("%" PNf, PNfARG(name_SV)) :
-                    newSVpvf("[%" UVuf "]", (UV)(base+i))
-                );
-            }
+            for(int i=0; i<count; ++i)
+                var_SVs[i] = sv_2mortal(get_varname_sv(base+i));
             hv_store(op_bag_HV, "var", 3, newRV_noinc((SV*) av_make(count, var_SVs)), 0);
 
             hv_store(op_bag_HV, "~next", 5, pending_parent_cntrs[pending_op_p] =newSV(0), 0);
             pending_ops[pending_op_p++] = o->op_next;//LINKLIST(o);
         }
 
-        else if(
-            OP_TYPE_IS_NN(o, OP_PADSV) ||
-            OP_TYPE_IS_NN(o, OP_PADAV) ||
-            0
-        ){
-            int base = o->op_targ;
-            hv_store(op_bag_HV, "base", 4, newSViv(base), 0);
-            PADLIST * const padlist = CvPADLIST(cv);
-            PADNAMELIST * comppad = PadlistNAMES(padlist);
-            PADNAME * name_SV = padnamelist_fetch(comppad, base);
-            hv_store(op_bag_HV, "var", 3, name_SV ?
-                newSVpvf("%" PNf, PNfARG(name_SV)) :
-                newSVpvf("[%" UVuf "]", (UV)base)
-            , 0);
-
+        else if( OP_TYPE_IS_NN(o, OP_PADSV) ){
+            PADOFFSET base = o->op_targ;
+            hv_store(op_bag_HV, "offset", 6, newSViv(base), 0);
+            hv_store(op_bag_HV, "var", 3, get_varname_sv(base), 0);
+            hv_store(op_bag_HV, "state", 5, newSViv(o->op_flags & OPf_MOD ? o->op_private & OPpPAD_STATE : 0), 0);
+            hv_store(op_bag_HV, "my", 2, newSViv(o->op_flags & OPf_MOD && !(o->op_private & OPpPAD_STATE) ? o->op_private & OPpLVAL_INTRO : 0), 0);
+            hv_store(op_bag_HV, "vivify", 6, newSViv(o->op_flags & OPf_MOD ? o->op_private & OPpDEREF: 0), 0);
+            hv_store(op_bag_HV, "~next", 5, pending_parent_cntrs[pending_op_p] =newSV(0), 0);
+            pending_ops[pending_op_p++] = o->op_next;//LINKLIST(o);
+        }
+        else if( OP_TYPE_IS_NN(o, OP_PADAV) ){
+            PADOFFSET base = o->op_targ;
+            hv_store(op_bag_HV, "offset", 6, newSViv(base), 0);
+            hv_store(op_bag_HV, "var", 3, get_varname_sv(base), 0);
             hv_store(op_bag_HV, "~next", 5, pending_parent_cntrs[pending_op_p] =newSV(0), 0);
             pending_ops[pending_op_p++] = o->op_next;//LINKLIST(o);
         }
 
         else if( OP_TYPE_IS_NN(o, OP_GVSV) ){
-            if(UNLIKELY(o->op_private & OPpLVAL_INTRO))
-                hv_store(op_bag_HV, "lval", 4, newSViv(1), 0);
+            hv_store(op_bag_HV, "lval", 4, newSViv(o->op_private & OPpLVAL_INTRO), 0);
             GV * gv = cGVOPo_gv;
-            if( isGV_with_GP(gv) ){
-                SV * name_SV = newSVpvs_flags("", SVs_TEMP);
-                gv_fullname3(name_SV, gv, NULL);
-                hv_store(op_bag_HV, "var", 3, name_SV, 0);
-            }
+            if( isGV_with_GP(gv) )
+                hv_store(op_bag_HV, "var", 3, get_gvname_sv(gv), 0);
             hv_store(op_bag_HV, "~next", 5, pending_parent_cntrs[pending_op_p] =newSV(0), 0);
             pending_ops[pending_op_p++] = o->op_next;//LINKLIST(o);
         }
 
         else if( OP_TYPE_IS_NN(o, OP_GV) ){
             GV * gv = cGVOPo_gv;
-            if( isGV_with_GP(gv) ){
-                SV * name_SV = newSVpvs_flags("", SVs_TEMP);
-                gv_fullname3(name_SV, gv, NULL);
-                hv_store(op_bag_HV, "var", 3, name_SV, 0);
-            }
+            if( isGV_with_GP(gv) )
+                hv_store(op_bag_HV, "var", 3, get_gvname_sv(gv), 0);
             hv_store(op_bag_HV, "~next", 5, pending_parent_cntrs[pending_op_p] =newSV(0), 0);
             pending_ops[pending_op_p++] = o->op_next;//LINKLIST(o);
         }
@@ -160,13 +196,12 @@ SV * create_op_chain(pTHX_ OP * start_op, CV * cv){
             OP_TYPE_IS_NN(o, OP_COND_EXPR) ||
             0
         ){
-            hv_store(op_bag_HV, "~next_true", 10, pending_parent_cntrs[pending_op_p] =newSV(0), 0);
+            enlarge_pending_ops(2);
+
+            hv_store(op_bag_HV, "~true", 5, pending_parent_cntrs[pending_op_p] =newSV(0), 0);
             pending_ops[pending_op_p++] = cLOGOPo->op_other;
 
-            if( pending_op_p==pending_op_capacity )
-                enlarge_pending_ops();
-
-            hv_store(op_bag_HV, "~next_false", 11, pending_parent_cntrs[pending_op_p] =newSV(0), 0);
+            hv_store(op_bag_HV, "~false", 6, pending_parent_cntrs[pending_op_p] =newSV(0), 0);
             pending_ops[pending_op_p++] = o->op_next;//LINKLIST(o);
         }
 
@@ -176,19 +211,17 @@ SV * create_op_chain(pTHX_ OP * start_op, CV * cv){
             OP_TYPE_IS_NN(o, OP_DORASSIGN) ||
             0
         ){
-            hv_store(op_bag_HV, "~next_false", 10, pending_parent_cntrs[pending_op_p] =newSV(0), 0);
+            enlarge_pending_ops(2);
+
+            hv_store(op_bag_HV, "~false", 6, pending_parent_cntrs[pending_op_p] =newSV(0), 0);
             pending_ops[pending_op_p++] = cLOGOPo->op_other;
 
-            if( pending_op_p==pending_op_capacity )
-                enlarge_pending_ops();
-
-            hv_store(op_bag_HV, "~next_true", 11, pending_parent_cntrs[pending_op_p] =newSV(0), 0);
+            hv_store(op_bag_HV, "~true", 5, pending_parent_cntrs[pending_op_p] =newSV(0), 0);
             pending_ops[pending_op_p++] = o->op_next;//LINKLIST(o);
         }
 
         else if( OP_TYPE_IS_NN(o, OP_UNSTACK) ){
-            if(o->op_flags & OPf_SPECIAL)
-                hv_store(op_bag_HV, "special", 7, newSViv(1), 0);
+            hv_store(op_bag_HV, "special", 7, newSViv(o->op_flags & OPf_SPECIAL), 0);
 
             hv_store(op_bag_HV, "~next", 5, pending_parent_cntrs[pending_op_p] =newSV(0), 0);
             pending_ops[pending_op_p++] = o->op_next;//LINKLIST(o);
@@ -232,8 +265,15 @@ SV * create_op_chain(pTHX_ OP * start_op, CV * cv){
             OP_TYPE_IS_NN(o, OP_BIT_AND) ||
             OP_TYPE_IS_NN(o, OP_BIT_XOR) ||
             OP_TYPE_IS_NN(o, OP_BIT_OR) ||
+            OP_TYPE_IS_NN(o, OP_NBIT_AND) ||
+            OP_TYPE_IS_NN(o, OP_NBIT_XOR) ||
+            OP_TYPE_IS_NN(o, OP_NBIT_OR) ||
+            OP_TYPE_IS_NN(o, OP_SBIT_AND) ||
+            OP_TYPE_IS_NN(o, OP_SBIT_XOR) ||
+            OP_TYPE_IS_NN(o, OP_SBIT_OR) ||
             0
         ){
+            hv_store(op_bag_HV, "target_at", 9, newSVpv(o->op_flags & OPf_STACKED ? "stack" : "op_targ", 0), 0);
             hv_store(op_bag_HV, "~next", 5, pending_parent_cntrs[pending_op_p] =newSV(0), 0);
             pending_ops[pending_op_p++] = o->op_next;//LINKLIST(o);
         }
@@ -244,6 +284,188 @@ SV * create_op_chain(pTHX_ OP * start_op, CV * cv){
             0
         ){
             hv_store(op_bag_HV, "maxarg", 6, newSViv(o->op_private & OPpARG4_MASK), 0);
+            hv_store(op_bag_HV, "~next", 5, pending_parent_cntrs[pending_op_p] =newSV(0), 0);
+            pending_ops[pending_op_p++] = o->op_next;//LINKLIST(o);
+        }
+
+        else if( OP_TYPE_IS_NN(o, OP_LAST) ){
+            IV special = o->op_flags & OPf_SPECIAL;
+            hv_store(op_bag_HV, "special", 7, newSViv(special), 0);
+            if( !special ){
+                IV stacked = o->op_flags & OPf_STACKED;
+                hv_store(op_bag_HV, "stacked", 7, newSViv(stacked), 0);
+                if( !stacked )
+                    hv_store(op_bag_HV, "target_label", 12, newSVpv(cPVOPo->op_pv, 0), 0);
+            }
+        }
+
+        else if( OP_TYPE_IS_NN(o, OP_MULTIDEREF) ){
+            hv_store(op_bag_HV, "exists", 6, newSViv(o->op_private & OPpMULTIDEREF_EXISTS), 0);
+            hv_store(op_bag_HV, "delete", 6, newSViv(o->op_private & OPpMULTIDEREF_DELETE), 0);
+            hv_store(op_bag_HV, "lval", 4, newSViv(o->op_flags & OPf_MOD), 0); // XXX ignore lvalue sub LVRET
+            hv_store(op_bag_HV, "defer", 5, newSViv(o->op_private & OPpLVAL_DEFER), 0);
+            hv_store(op_bag_HV, "localizing", 10, newSViv(o->op_private & OPpLVAL_INTRO), 0);
+
+            AV * accessor_AV = newAV();
+            hv_store(op_bag_HV, "accessor", 8, newRV_noinc((SV*) accessor_AV), 0);
+            HV * accessor_elem_HV;
+
+            UNOP_AUX_item *items = cUNOP_AUXo->op_aux;
+            UV actions = items->uv;
+            while(1){
+                switch (actions & MDEREF_ACTION_MASK) {
+                    case MDEREF_reload:
+                        actions = (++items)->uv;
+                        continue;
+                    case MDEREF_AV_padav_aelem:                 /* $lex[...] */
+                        ++items;
+                        accessor_elem_HV = newHV();
+                        av_push(accessor_AV, newRV_noinc((SV*)accessor_elem_HV));
+                        hv_store(accessor_elem_HV, "type", 4, newSVpv("lex_array", 0), 0);
+                        hv_store(accessor_elem_HV, "offset", 6, newSViv(items->pad_offset), 0);
+                        hv_store(accessor_elem_HV, "var", 3, get_varname_sv(items->pad_offset), 0);
+                        goto do_AV_aelem;
+                    case MDEREF_AV_gvav_aelem:                  /* $pkg[...] */
+                        ++items;
+                        accessor_elem_HV = newHV();
+                        av_push(accessor_AV, newRV_noinc((SV*)accessor_elem_HV));
+                        hv_store(accessor_elem_HV, "type", 4, newSVpv("pkg_array", 0), 0);
+                        {
+                            GV * gv = (GV*)UNOP_AUX_item_sv(items)
+                            hv_store(accessor_elem_HV, "var", 3, get_gvname_sv(gv), 0);
+                        }
+                        goto do_AV_aelem;
+                    case MDEREF_AV_pop_rv2av_aelem:             /* expr->[...] */
+                        accessor_elem_HV = newHV();
+                        av_push(accessor_AV, newRV_noinc((SV*)accessor_elem_HV));
+                        hv_store(accessor_elem_HV, "type", 4, newSVpv("expr_array", 0), 0);
+                        goto do_AV_aelem;
+                    case MDEREF_AV_gvsv_vivify_rv2av_aelem:     /* $pkg->[...] */
+                        ++items;
+                        accessor_elem_HV = newHV();
+                        av_push(accessor_AV, newRV_noinc((SV*)accessor_elem_HV));
+                        hv_store(accessor_elem_HV, "type", 4, newSVpv("pkg_arrayref", 0), 0);
+                        {
+                            GV * gv = (GV*)UNOP_AUX_item_sv(items);
+                            hv_store(accessor_elem_HV, "var", 3, get_gvname_sv(gv), 0);
+                        }
+                        goto do_AV_aelem;
+                    case MDEREF_AV_padsv_vivify_rv2av_aelem:     /* $lex->[...] */
+                        ++items;
+                        accessor_elem_HV = newHV();
+                        av_push(accessor_AV, newRV_noinc((SV*)accessor_elem_HV));
+                        hv_store(accessor_elem_HV, "type", 4, newSVpv("lex_arrayref", 0), 0);
+                        hv_store(accessor_elem_HV, "offset", 6, newSViv(items->pad_offset), 0);
+                        hv_store(accessor_elem_HV, "var", 3, get_varname_sv(items->pad_offset), 0);
+                        goto do_AV_aelem;
+                    case MDEREF_AV_vivify_rv2av_aelem:           /* vivify, ->[...] */
+                        accessor_elem_HV = newHV();
+                        av_push(accessor_AV, newRV_noinc((SV*)accessor_elem_HV));
+                        hv_store(accessor_elem_HV, "type", 4, newSVpv("vivify_arrayref", 0), 0);
+                        goto do_AV_aelem;
+                    do_AV_aelem:
+                        switch (actions & MDEREF_INDEX_MASK) {
+                            case MDEREF_INDEX_none:
+                                goto finish;
+                            case MDEREF_INDEX_const:
+                                hv_store(accessor_elem_HV, "index", 5, newSViv((++items)->iv), 0);
+                                break;
+                            case MDEREF_INDEX_padsv:
+                                ++items;
+                                hv_store(accessor_elem_HV, "index_offset", 12, newSViv(items->pad_offset), 0);
+                                hv_store(accessor_elem_HV, "index_var", 9, get_varname_sv(items->pad_offset), 0);
+                                break;
+                            case MDEREF_INDEX_gvsv:
+                                ++items;
+                                {
+                                    GV * gv = (GV*) UNOP_AUX_item_sv(items);
+                                    hv_store(accessor_elem_HV, "index_pkgvar", 12, get_gvname_sv(gv), 0);
+                                }
+                                break;
+                        }
+                        if(!(actions & MDEREF_FLAG_last))
+                            break;
+                        goto finish;
+                    case MDEREF_HV_padhv_helem:                 /* $lex{...} */
+                        ++items;
+                        accessor_elem_HV = newHV();
+                        av_push(accessor_AV, newRV_noinc((SV*)accessor_elem_HV));
+                        hv_store(accessor_elem_HV, "type", 4, newSVpv("lex_hash", 0), 0);
+                        hv_store(accessor_elem_HV, "offset", 6, newSViv(items->pad_offset), 0);
+                        hv_store(accessor_elem_HV, "var", 3, get_varname_sv(items->pad_offset), 0);
+                        goto do_HV_helem;
+                    case MDEREF_HV_gvhv_helem:                  /* $pkg{...} */
+                        ++items;
+                        accessor_elem_HV = newHV();
+                        av_push(accessor_AV, newRV_noinc((SV*)accessor_elem_HV));
+                        hv_store(accessor_elem_HV, "type", 4, newSVpv("pkg_hash", 0), 0);
+                        {
+                            GV * gv = (GV*)UNOP_AUX_item_sv(items)
+                            hv_store(accessor_elem_HV, "var", 3, get_gvname_sv(gv), 0);
+                        }
+                        goto do_HV_helem;
+                    case MDEREF_HV_pop_rv2hv_helem:             /* expr->{...} */
+                        accessor_elem_HV = newHV();
+                        av_push(accessor_AV, newRV_noinc((SV*)accessor_elem_HV));
+                        hv_store(accessor_elem_HV, "type", 4, newSVpv("expr_hash", 0), 0);
+                        goto do_HV_helem;
+                    case MDEREF_HV_gvsv_vivify_rv2hv_helem:     /* $pkg->{...} */
+                        ++items;
+                        accessor_elem_HV = newHV();
+                        av_push(accessor_AV, newRV_noinc((SV*)accessor_elem_HV));
+                        hv_store(accessor_elem_HV, "type", 4, newSVpv("pkg_hashref", 0), 0);
+                        {
+                            GV * gv = (GV*)UNOP_AUX_item_sv(items)
+                            hv_store(accessor_elem_HV, "var", 3, get_gvname_sv(gv), 0);
+                        }
+                        goto do_HV_helem;
+                    case MDEREF_HV_padsv_vivify_rv2hv_helem:    /* $lex->{...} */
+                        ++items;
+                        accessor_elem_HV = newHV();
+                        av_push(accessor_AV, newRV_noinc((SV*)accessor_elem_HV));
+                        hv_store(accessor_elem_HV, "type", 4, newSVpv("lex_hashref", 0), 0);
+                        hv_store(accessor_elem_HV, "offset", 6, newSViv(items->pad_offset), 0);
+                        hv_store(accessor_elem_HV, "var", 3, get_varname_sv(items->pad_offset), 0);
+                        goto do_HV_helem;
+                    case MDEREF_HV_vivify_rv2hv_helem:
+                        accessor_elem_HV = newHV();
+                        av_push(accessor_AV, newRV_noinc((SV*)accessor_elem_HV));
+                        hv_store(accessor_elem_HV, "type", 4, newSVpv("vivify_hashref", 0), 0);
+                        goto do_HV_helem;
+                    do_HV_helem:
+                        switch (actions & MDEREF_INDEX_MASK) {
+                            case MDEREF_INDEX_none:
+                                goto finish;
+
+                            case MDEREF_INDEX_const:
+                                {
+                                    SV * sv = UNOP_AUX_item_sv(++items);
+                                    hv_store(accessor_elem_HV, "key", 3, newSVsv(sv), 0);
+                                }
+                                break;
+
+                            case MDEREF_INDEX_padsv:
+                                ++items;
+                                hv_store(accessor_elem_HV, "key_offset", 10, newSViv(items->pad_offset), 0);
+                                hv_store(accessor_elem_HV, "key_var", 7, get_varname_sv(items->pad_offset), 0);
+                                break;
+
+                            case MDEREF_INDEX_gvsv:
+                                ++items;
+                                {
+                                    GV * gv = (GV*) UNOP_AUX_item_sv(items);
+                                    hv_store(accessor_elem_HV, "key_pkgvar", 10, get_gvname_sv(gv), 0);
+                                }
+                                break;
+                        }
+                        if(!(actions & MDEREF_FLAG_last))
+                            break;
+                        goto finish;
+                }
+                actions >>= MDEREF_SHIFT;
+            }
+            finish:;
+
             hv_store(op_bag_HV, "~next", 5, pending_parent_cntrs[pending_op_p] =newSV(0), 0);
             pending_ops[pending_op_p++] = o->op_next;//LINKLIST(o);
         }

@@ -8,3 +8,4 @@ t/Speedup.t
 fallback/const-c.inc
 fallback/const-xs.inc
 lib/Speedup.pm
+lib/Inline/Speedup.pm
