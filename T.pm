@@ -15,8 +15,24 @@ use Inline Config =>
 #use Inline C => config => optimize => '-O0';
 #use Inline 'Speedup' => 'gcd';
 #Inline->bind('Speedup' => 'gcd count_factor');
-Inline->bind('Speedup' => 'gcd count_factor', optimize => '-O3');
+Inline->bind('Speedup' => 'count_factor', optimize => '-O3');
 #Inline->bind('Speedup' => 'gcd');
+
+sub add {
+    my($a, $b) = @_;
+    $b = $a+$b;
+    return $b;
+    #my $r = $a+$b;
+    #return $r;
+}
+
+sub try_add {
+    my $a = int rand 20;
+    my $b = int rand 20;
+    my $r = add($a, $b);
+    say "$a + $b = $r";
+}
+try_add() for(1..10);
 
 sub gcd {
     #my($a, $b, $h, @x, %y) = (@_, 20);
@@ -55,11 +71,13 @@ for(1..10) {
 
 sub count_factor {
     my($n) = @_;
-    my $n_ = int $n;
+    my $n = int $n;
     my $ans = 0;
-    for(my $i=1; $i<=$n_; ++$i) {
-    #for(my $i=1; $i<=$n_; $i=$i+1) {
-        if( $n_ % $i == 0 ) {
+    #for(my $i=1; $i<=$n; ++$i) {
+    for(my $i=1; $i<=$n; $i+=1) {
+    #for(my $i=1; $i<=$n; $i=$i+1) {
+    #for(my $i=1; $i<=$n; $i=(1+$i+1)-1) {
+        if( $n % $i == 0 ) {
             ++$ans;
         }
     }

@@ -195,6 +195,11 @@ sub gen_code {
           }
         , INT => "BOOL,BOOL"
         , NUM => "BOOL,BOOL"
+        , INTNUM =>
+          sub {
+            my($from, $to) = @_;
+            push @XS, "$to.INT = $from;";
+          }
         # consumed by 'and', 'or' directly, no convertion needed
         }
       , INT =>
@@ -654,6 +659,33 @@ sub gen_code {
     while(my($name, $imp) = each %IMP) {
         $imp->{name} = $name;
     }
+    my $best_imp = sub {
+        my @type = ref $_[0] ? @{$_[0]} : ($_[0]);
+        my($need_type) = @_;
+        my($best_imp, $best_imp_score) = ('ANY', 0+@{$IMP{ANY}{accept}});
+        for my $imp (values %IMP) {
+            next if( @{$imp->{accept}} >= $best_imp_score );
+            my $accepted = 1;
+            for my $type (@type) {
+                my $found = 0;
+                for my $t (values @{$imp->{accept}}) {
+                    if( $t eq $type ) {
+                        $found = 1;
+                        last;
+                    }
+                }
+                if( !$found ) {
+                    $accepted = 0;
+                    last;
+                }
+            }
+            if( $accepted ) {
+                $best_imp = $imp->{name};
+                $best_imp_score = @{$imp->{accept}};
+            }
+        }
+        return $best_imp;
+    };
     my $gen_decl = sub {
         my($symbol, $comment) = @_;
         no warnings 'uninitialized';
@@ -1117,32 +1149,38 @@ sub gen_code {
 
       }
     , ( map {
-        my($name, $operator, $operand_type, $result_type) = @$_;
+        my($name, $operator, $operand_type, $result_type, $rule_gen) = @$_;
         ( $name =>
           { inf => sub {
                 my($op) = @_;
-                my $a = $uid++;
-                my $b = $uid++;
-                my $o = $uid++;
-                $var{"t$a"} = {op => $name, input => [], output => $operand_type};
-                $var{"t$b"} = {op => $name, input => [], output => $operand_type};
-                $var{"t$o"} = {op => $name, input => [[$result_type, ["t$a", "t$b"]]], output => []};
-                $stack[-1][-1][-2]{get}("t$a");
-                $stack[-1][-1][-1]{get}("t$b");
+                my $a = 't'.$uid++;
+                my $b = 't'.$uid++;
+                my $o = $op->{target_at} eq 'stack' ? 't'.$uid++ : 'pad'.$op->{op_targ};
+                my @extra_rule = $rule_gen ? ($rule_gen->($a, $b, $o)) : ();
+                $var{$a} = {op => $name, input => [], output => $operand_type, extra_rule => [@extra_rule]};
+                $var{$b} = {op => $name, input => [], output => $operand_type, extra_rule => [@extra_rule]};
+                $stack[-1][-1][-2]{get}($a);
+                $stack[-1][-1][-1]{get}($b);
+
+                if( exists($var{$o}) ) {
+                    push @{$var{$o}{input}}, @$result_type;
+                } else {
+                    $var{$o} = {op => $name, input => $result_type, output => [], extra_rule => [@extra_rule]};
+                }
                 if( $op->{target_at} eq 'stack' ) {
-                    $stack[-1][-1][-2]{put}("t$o");
+                    $stack[-1][-1][-2]{put}($o);
                 } else {
                     $stack[-1][-1][-2] =
                       { put => sub {
                             my($symbol) = @_;
                             warn "???";
-                            #push @{$var{"t$o"}{input}}, $symbol;
-                            #push @{$var{$symbol}{output}}, "t$o";
+                            #push @{$var{$o}{input}}, $symbol;
+                            #push @{$var{$symbol}{output}}, $o;
                         }
                       , get => sub {
                             my($symbol) = @_;
-                            push @{$var{$symbol}{input}}, "t$o";
-                            push @{$var{"t$o"}{output}}, $symbol;
+                            push @{$var{$symbol}{input}}, $o;
+                            push @{$var{$o}{output}}, $symbol;
                         }
                       };
                 }
@@ -1151,17 +1189,19 @@ sub gen_code {
             }
           , gen => sub {
                 my($op) = @_;
-                my $a = $uid++;
-                my $b = $uid++;
-                my $o = $uid++;
+                my $a = 't'.$uid++;
+                my $b = 't'.$uid++;
+                my $o = $op->{target_at} eq 'stack' ? 't'.$uid++ : 'pad'.$op->{op_targ};
 
-                $gen_decl->("t$a");
-                $gen_move->($stack[-1][-1][-2]{symbol}, "t$a");
+                $gen_decl->($a);
+                $gen_move->($stack[-1][-1][-2]{symbol}, $a);
 
-                $gen_decl->("t$b");
-                $gen_move->($stack[-1][-1][-1]{symbol}, "t$b");
+                $gen_decl->($b);
+                $gen_move->($stack[-1][-1][-1]{symbol}, $b);
 
-                $gen_decl->("t$o");
+                if( $var{$o}{op} eq $name ) {
+                    $gen_decl->($o);
+                }
 
                 local @var{qw(a_int b_int o_int a_num b_num o_num)} = (({imp => 'INT'})x3, ({imp => 'NUM'})x3);
                 my $static_type = 'INT';
@@ -1170,28 +1210,28 @@ sub gen_code {
                         BOOL => 1,
                         INT => 1,
                         NUM => 0,
-                        INTNUM => "t$v.INT!=IV_MIN",
+                        INTNUM => "$v.INT!=IV_MIN",
                     );
-                    my $expr = $int_det{$var{"t$v"}{imp}};
-                    push @XS, qq(int t$v\_is_int = $expr; // $var{"t$v"}{imp});
+                    my $expr = $int_det{$var{$v}{imp}};
+                    push @XS, qq(int $v\_is_int = $expr; // $var{$v}{imp});
                     $static_type = 'NUM' if( $expr eq '0' );
                     $static_type = '' if( $static_type eq 'INT' && $expr ne '1' );
                 }
-                push @XS, "if( t$a\_is_int && t$b\_is_int ){";
+                push @XS, "if( $a\_is_int && $b\_is_int ){";
                 if( $static_type ne 'NUM' ) {
                     push @XS, "  IV a_int, b_int, o_int;";
-                    $gen_move->("t$a", "a_int");
-                    $gen_move->("t$b", "b_int");
+                    $gen_move->($a, "a_int");
+                    $gen_move->($b, "b_int");
                     push @XS, "  o_int = a_int $operator b_int;";
-                    $gen_move->("o_int", "t$o");
+                    $gen_move->("o_int", $o);
                 }
                 push @XS, "}else{";
                 if( $static_type ne 'INT' ) {
                     push @XS, "  NV a_num, b_num, o_num;";
-                    $gen_move->("t$a", "a_num");
-                    $gen_move->("t$b", "b_num");
+                    $gen_move->($a, "a_num");
+                    $gen_move->($b, "b_num");
                     push @XS, "  o_num = a_num $operator b_num;";
-                    $gen_move->("o_num", "t$o");
+                    $gen_move->("o_num", $o);
                 }
                 push @XS, "}";
 #                push @XS, "SV *t$a, *t$b;";
@@ -1199,10 +1239,10 @@ sub gen_code {
 #                $stack[-1][-1][-1]{get}("t$b");
 #                push @XS, "SV *t$o = sv_2mortal(newSViv(SvIV(t$a) $operator SvIV(t$b)));";
                 if( $op->{target_at} eq 'stack' ) {
-                    $gen_move->("t$o", $stack[-1][-1][-2]{symbol});
+                    $gen_move->($o, $stack[-1][-1][-2]{symbol});
 #                    $stack[-1][-1][-2]{put}("t$o");
                 } else {
-                    $stack[-1][-1][-2] = {symbol => "t$o"};
+                    $stack[-1][-1][-2] = {symbol => $o};
 #                      { put => sub {
 #                            my($symbol) = @_;
 #                            push @XS, "SvSetSV(t$o, $symbol);";
@@ -1218,14 +1258,52 @@ sub gen_code {
             }
           }
         );
-      } ( [ge => '>=', ['INT', 'NUM'], 'BOOL']
-        , [gt => '>', ['INT', 'NUM'], 'BOOL']
-        , [eq => '==', ['INT', 'NUM'], 'BOOL']
-        , [lt => '<', ['INT', 'NUM'], 'BOOL']
-        , [le => '<=', ['INT', 'NUM'], 'BOOL']
-        , [add => '+', ['INT', 'NUM'], ['INT', 'NUM']]
-        , [modulo => '%', 'INT', 'INT']
-        , [bit_xor => '^', 'INT', 'INT']
+      } ( [ ge => '>=', ['INT', 'NUM'], ['BOOL'],
+            sub { my($ta, $tb, $to) = @_; sub {
+                $var{$tb}{type} = 'NUM' if( $best_imp->($ta) eq 'NUM' );
+                $var{$ta}{type} = 'NUM' if( $best_imp->($tb) eq 'NUM' );
+            } }
+          ]
+        , [ gt => '>', ['INT', 'NUM'], ['BOOL'],
+            sub { my($ta, $tb, $to) = @_; sub {
+                $var{$tb}{type} = 'NUM' if( $best_imp->($ta) eq 'NUM' );
+                $var{$ta}{type} = 'NUM' if( $best_imp->($tb) eq 'NUM' );
+            } }
+          ]
+        , [ eq => '==', ['INT', 'NUM'], ['BOOL'],
+            sub { my($ta, $tb, $to) = @_; sub {
+                $var{$tb}{type} = 'NUM' if( $best_imp->($ta) eq 'NUM' );
+                $var{$ta}{type} = 'NUM' if( $best_imp->($tb) eq 'NUM' );
+            } }
+          ]
+        , [ lt => '<', ['INT', 'NUM'], ['BOOL'],
+            sub { my($ta, $tb, $to) = @_; sub {
+                $var{$tb}{type} = 'NUM' if( $best_imp->($ta) eq 'NUM' );
+                $var{$ta}{type} = 'NUM' if( $best_imp->($tb) eq 'NUM' );
+            } }
+          ]
+        , [ le => '<=', ['INT', 'NUM'], ['BOOL'],
+            sub { my($ta, $tb, $to) = @_; sub {
+                $var{$tb}{type} = 'NUM' if( $best_imp->($ta) eq 'NUM' );
+                $var{$ta}{type} = 'NUM' if( $best_imp->($tb) eq 'NUM' );
+            } }
+          ]
+        , [ add => '+', ['INT', 'NUM'], ['INT', 'NUM'],
+            sub { my($ta, $tb, $to) = @_; sub {
+                $var{$tb}{type} = 'NUM' if( $best_imp->($ta) eq 'NUM' );
+                $var{$ta}{type} = 'NUM' if( $best_imp->($tb) eq 'NUM' );
+            } }
+          ]
+        , [ subtract => '-', ['INT', 'NUM'], ['INT', 'NUM'],
+            sub { my($ta, $tb, $to) = @_; sub {
+                $var{$tb}{type} = 'NUM' if( $best_imp->($ta) eq 'NUM' );
+                $var{$ta}{type} = 'NUM' if( $best_imp->($tb) eq 'NUM' );
+            } }
+          ]
+        , [ modulo => '%', ['INT'], ['INT'],
+          ]
+        , [ bit_xor => '^', ['INT'], ['INT'],
+          ]
         )
       )
     , preinc =>
@@ -1436,29 +1514,7 @@ sub gen_code {
         }
     }
     for my $var (values %var) {
-        my($best_imp, $best_imp_score) = ('ANY', 0+@{$IMP{ANY}{accept}});
-        for my $imp (values %IMP) {
-            next if( @{$imp->{accept}} >= $best_imp_score );
-            my $accepted = 1;
-            for my $type (ref $var->{type} ? @{$var->{type}} : $var->{type}) {
-                my $found = 0;
-                for my $t (values @{$imp->{accept}}) {
-                    if( $t eq $type ) {
-                        $found = 1;
-                        last;
-                    }
-                }
-                if( !$found ) {
-                    $accepted = 0;
-                    last;
-                }
-            }
-            if( $accepted ) {
-                $best_imp = $imp->{name};
-                $best_imp_score = @{$imp->{accept}};
-            }
-        }
-        $var->{imp} = $best_imp;
+        $var->{imp} = $best_imp->($var->{type});
     }
 
     use Data::Dumper;

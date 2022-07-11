@@ -274,6 +274,10 @@ SV * create_op_chain(pTHX_ OP * start_op, CV * cv){
             0
         ){
             hv_store(op_bag_HV, "target_at", 9, newSVpv(o->op_flags & OPf_STACKED ? "stack" : "op_targ", 0), 0);
+            if( !(o->op_flags & OPf_STACKED) ){
+                hv_store(op_bag_HV, "op_targ", 7, newSViv(o->op_targ), 0);
+                hv_store(op_bag_HV, "op_targ_var", 11, get_varname_sv(o->op_targ), 0);
+            }
             hv_store(op_bag_HV, "~next", 5, pending_parent_cntrs[pending_op_p] =newSV(0), 0);
             pending_ops[pending_op_p++] = o->op_next;//LINKLIST(o);
         }
