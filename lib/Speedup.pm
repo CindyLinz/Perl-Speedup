@@ -791,6 +791,16 @@ sub gen_code {
             push @op_stack, $op->{'~next'};
         }
       }
+    , argcheck =>
+      { inf => sub {
+            my($op) = @_;
+            push @op_stack, $op->{'~next'};
+        }
+      , gen => sub {
+            my($op) = @_;
+            push @op_stack, $op->{'~next'};
+        }
+      }
     , enter =>
       { inf => sub {
             my($op) = @_;
@@ -1333,6 +1343,32 @@ sub gen_code {
 #            push @XS, "SV * t$t;";
 #            $stack[-1][-1][-1]{get}("t$t");
 #            push @XS, "sv_inc(t$t);";
+            push @op_stack, $op->{'~next'};
+        }
+      }
+    , predec =>
+      { inf => sub {
+            my($op) = @_;
+            my $t = $uid++;
+            $var{"t$t"} = {op => 'predec', input => [], output => []};
+            $stack[-1][-1][-1]{get}("t$t");
+            $stack[-1][-1][-1]{put}("t$t");
+            for my $dir (qw(input output)) {
+                @{$var{"t$t"}{$dir}} = map { [(ref $_ ? @$_ : $_), 'INT'] } @{$var{"t$t"}{$dir}};
+            }
+            push @op_stack, $op->{'~next'};
+        }
+      , gen => sub {
+            my($op) = @_;
+            my $t = $uid++;
+            $gen_decl->("t$t");
+            $gen_move->($stack[-1][-1][-1]{symbol}, "t$t");
+            if( $var{"t$t"}{imp} eq 'INT' ) {
+                push @XS, "--t$t;";
+            } else {
+                push @XS, "sv_int(t$t);";
+            }
+            $gen_move->("t$t", $stack[-1][-1][-1]{symbol});
             push @op_stack, $op->{'~next'};
         }
       }

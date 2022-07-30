@@ -81,6 +81,7 @@ SV * create_op_chain(pTHX_ OP * start_op, CV * cv){
             OP_TYPE_IS_NN(o, OP_LEAVELOOP) ||
             OP_TYPE_IS_NN(o, OP_ENTER) ||
             OP_TYPE_IS_NN(o, OP_LEAVE) ||
+            OP_TYPE_IS_NN(o, OP_ARGCHECK) ||
             0
         ){
             hv_store(op_bag_HV, "~next", 5, pending_parent_cntrs[pending_op_p] =newSV(0), 0);
@@ -160,6 +161,14 @@ SV * create_op_chain(pTHX_ OP * start_op, CV * cv){
         }
         else if( OP_TYPE_IS_NN(o, OP_PADAV) ){
             PADOFFSET base = o->op_targ;
+            if( o->op_private & OPpLVAL_INTRO ){
+                if( o->op_private & OPpPAD_STATE )
+                    hv_store(op_bag_HV, "state", 5, newSViv(o->op_private & OPpPAD_STATE), 0);
+                else
+                    hv_store(op_bag_HV, "my", 2, newSViv(o->op_private & OPpLVAL_INTRO), 0);
+            }
+            hv_store(op_bag_HV, "maybe_lvsub", 11, newSViv(o->op_private & OPpMAYBE_LVSUB), 0);
+            hv_store(op_bag_HV, "ref", 3, newSViv(o->op_flags & OPf_REF), 0);
             hv_store(op_bag_HV, "offset", 6, newSViv(base), 0);
             hv_store(op_bag_HV, "var", 3, get_varname_sv(base), 0);
             hv_store(op_bag_HV, "~next", 5, pending_parent_cntrs[pending_op_p] =newSV(0), 0);
